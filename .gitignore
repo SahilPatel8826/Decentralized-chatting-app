@@ -1,0 +1,93 @@
+# Binaries
+
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.out
+
+# Go build files
+
+/bin/
+/dist/
+/build/
+
+# Go test
+
+*.test
+*.prof
+coverage.out
+
+# Environment files
+
+.env
+.env.local
+.env.dev
+.env.prod
+
+# Logs
+
+*.log
+logs/
+tmp/
+
+# IDE
+
+.vscode/
+.idea/
+
+# OS files
+
+.DS_Store
+Thumbs.db
+
+# JetBrains
+
+*.iml
+
+# Go workspace
+
+go.work
+go.work.sum
+
+# Vendor (uncomment if you don't commit vendor)
+
+/vendor/
+
+# Generated files
+
+*.tmp
+
+# Air live reload
+
+.air.toml
+
+# Docker
+
+docker-compose.override.yml
+
+# Database
+
+*.db
+*.sqlite
+*.sqlite3
+
+# Secrets
+
+secrets/
+config.local.yaml
+config.local.yml
+
+# Swagger generated docs (optional)
+
+docs/
+
+# Node (if frontend exists)
+
+node_modules/
+
+# Coverage
+
+coverage/
+*.coverprofile
