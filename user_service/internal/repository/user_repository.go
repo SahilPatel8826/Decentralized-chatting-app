@@ -84,3 +84,20 @@ func (r *UserRepository) Search(
 
 	return users, err
 }
+func (r *UserRepository) SearchUsers(
+	query string,
+) ([]model.User, error) {
+
+	var users []model.User
+
+	err := r.DB.
+		Where(
+			"username ILIKE ?",
+			"%"+query+"%",
+		).
+		Limit(20).
+		Find(&users).
+		Error
+
+	return users, err
+}

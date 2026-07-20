@@ -64,7 +64,7 @@ func (s *UserService) Delete(
 	userID string,
 ) error {
 
-	user, err :=
+	_, err :=
 		s.userRepo.GetByID(userID)
 
 	if err != nil {
@@ -72,7 +72,7 @@ func (s *UserService) Delete(
 	}
 
 	return s.userRepo.Delete(
-		user.ID.String(),
+		userID,
 	)
 }
 func (s *UserService) Search(

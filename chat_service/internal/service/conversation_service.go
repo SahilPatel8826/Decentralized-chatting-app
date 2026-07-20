@@ -1,15 +1,19 @@
 package service
 
 import (
+	"chat_service/internal/client"
 	"chat_service/internal/dto"
 	"chat_service/internal/model"
 	"chat_service/internal/repository"
+	"chat_service/pb"
 	"context"
 	"errors"
 )
 
 type ConversationService struct {
 	repo *repository.ConversationRepository
+
+	userClient client.UserService
 }
 
 var (
@@ -24,9 +28,14 @@ var (
 	ErrParticipantsRequired   = errors.New("participants are required")
 )
 
-func NewConversationService(repo *repository.ConversationRepository) *ConversationService {
+func NewConversationService(
+	repo *repository.ConversationRepository,
+	userClient client.UserService,
+) *ConversationService {
+
 	return &ConversationService{
-		repo: repo,
+		repo:       repo,
+		userClient: userClient,
 	}
 }
 
@@ -583,4 +592,24 @@ func (s *ConversationService) LeaveGroup(
 	}
 
 	return nil
+}
+func (s *ConversationService) SearchUsers(
+	ctx context.Context,
+	query string,
+) (
+	[]*pb.User,
+	error,
+) {
+
+	res, err :=
+		s.userClient.SearchUsers(
+			ctx,
+			query,
+		)
+
+	if err != nil {
+		return nil, err
+	}
+
+	return res.Users, nil
 }

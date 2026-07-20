@@ -1,13 +1,11 @@
 package model
 
 import (
-	"time"
-
-	"github.com/google/uuid"
+	"gorm.io/gorm"
 )
 
 type User struct {
-	ID uuid.UUID `gorm:"type:uuid;primaryKey" json:"id"`
+	gorm.Model
 
 	Username string `gorm:"uniqueIndex;not null" json:"username"`
 
@@ -20,8 +18,4 @@ type User struct {
 	Bio string `json:"bio"`
 
 	AvatarURL string `json:"avatar_url"`
-
-	CreatedAt time.Time `json:"created_at"`
-
-	UpdatedAt time.Time `json:"updated_at"`
 }

@@ -374,3 +374,32 @@ func (h *ConversationHandler) LeaveGroup(
 		},
 	)
 }
+func (h *ConversationHandler) SearchUsers(
+	c *gin.Context,
+) {
+
+	query := c.Query("q")
+
+	users, err :=
+		h.conversationService.SearchUsers(
+			c.Request.Context(),
+			query,
+		)
+
+	if err != nil {
+
+		c.JSON(
+			http.StatusInternalServerError,
+			gin.H{
+				"error": err.Error(),
+			},
+		)
+
+		return
+	}
+
+	c.JSON(
+		http.StatusOK,
+		users,
+	)
+}

@@ -238,3 +238,61 @@ func (h *MessageHandler) DeleteMessage(
 		},
 	)
 }
+func (h *MessageHandler) MarkDelivered(
+	c *gin.Context,
+) {
+
+	userID := c.GetString(
+		"userID",
+	)
+
+	messageIDStr :=
+		c.Param(
+			"messageID",
+		)
+
+	messageID, err :=
+		strconv.ParseUint(
+			messageIDStr,
+			10,
+			64,
+		)
+
+	if err != nil {
+
+		c.JSON(
+			http.StatusBadRequest,
+			gin.H{
+				"error": "invalid message id",
+			},
+		)
+
+		return
+	}
+
+	err = h.messageService.MarkDelivered(
+		c.Request.Context(),
+		userID,
+		uint(messageID),
+	)
+
+	if err != nil {
+
+		c.JSON(
+			http.StatusBadRequest,
+			gin.H{
+				"error": err.Error(),
+			},
+		)
+
+		return
+	}
+
+	c.JSON(
+		http.StatusOK,
+		gin.H{
+			"message": "message delivered",
+		},
+	)
+
+}

@@ -3,21 +3,28 @@ package main
 import (
 	"fmt"
 	"log"
+	"net"
 	"os"
 
 	"chat_app/internal/database"
+	grpcserver "chat_app/internal/grpc"
 	"chat_app/internal/handler"
 	"chat_app/internal/model"
 	"chat_app/internal/repository"
 	"chat_app/internal/routes"
 	"chat_app/internal/service"
+	pb "chat_app/pb"
 
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
+
+	"google.golang.org/grpc"
 )
 
 func main() {
+
 	err := godotenv.Load("../../.env")
+
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -31,8 +38,7 @@ func main() {
 		os.Getenv("DB_PORT"),
 	)
 
-	db, err :=
-		database.Connect(dsn)
+	db, err := database.Connect(dsn)
 
 	if err != nil {
 		log.Fatal(err)
@@ -46,8 +52,18 @@ func main() {
 		log.Fatal(err)
 	}
 
+	// ==========================
+	// Repositories
+	// ==========================
+
 	userRepo :=
-		repository.NewUserRepository(db)
+		repository.NewUserRepository(
+			db,
+		)
+
+	// ==========================
+	// Services
+	// ==========================
 
 	authService :=
 		service.NewAuthService(
@@ -59,6 +75,10 @@ func main() {
 			userRepo,
 		)
 
+	// ==========================
+	// HTTP Handlers
+	// ==========================
+
 	authHandler :=
 		handler.NewAuthHandler(
 			authService,
@@ -68,6 +88,52 @@ func main() {
 		handler.NewUserHandler(
 			userService,
 		)
+
+	// ==========================
+	// gRPC Server
+	// ==========================
+
+	userGrpcServer :=
+		grpcserver.NewUserServer(
+			userRepo,
+		)
+
+	lis, err :=
+		net.Listen(
+			"tcp",
+			":50051",
+		)
+
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	grpcServer :=
+		grpc.NewServer()
+
+	pb.RegisterUserServiceServer(
+		grpcServer,
+		userGrpcServer,
+	)
+
+	go func() {
+
+		log.Println(
+			"gRPC Server running on :50051",
+		)
+
+		if err :=
+			grpcServer.Serve(
+				lis,
+			); err != nil {
+
+			log.Fatal(err)
+		}
+	}()
+
+	// ==========================
+	// HTTP Server
+	// ==========================
 
 	router := gin.Default()
 
@@ -95,10 +161,15 @@ func main() {
 	)
 
 	log.Println(
-		"User Service running on :8080",
+		"HTTP Server running on :8080",
 	)
 
-	if err := router.Run(":8080"); err != nil {
+	if err :=
+		router.Run(
+			":8080",
+		); err != nil {
+
 		log.Fatal(err)
 	}
+
 }

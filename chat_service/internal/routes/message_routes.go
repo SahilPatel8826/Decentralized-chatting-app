@@ -38,4 +38,9 @@ func MessageRoutes(
 		middleware.AuthMiddleware(),
 		messageHandler.GetMessages,
 	)
+	messages.PATCH(
+		"/:messageID/delivered",
+		messageHandler.MarkDelivered,
+	)
+
 }

@@ -1,0 +1,58 @@
+syntax = "proto3";
+
+package user;
+
+option go_package = "./pb";
+
+service UserService {
+
+  rpc UserExists(
+    UserExistsRequest
+  ) returns (
+    UserExistsResponse
+  );
+
+  rpc GetUser(
+    GetUserRequest
+  ) returns (
+    UserResponse
+  );
+
+  rpc SearchUsers(
+    SearchUsersRequest
+  ) returns (
+    SearchUsersResponse
+  );
+}
+
+message UserExistsRequest {
+  string user_id = 1;
+}
+
+message UserExistsResponse {
+  bool exists = 1;
+}
+
+message GetUserRequest {
+  string user_id = 1;
+}
+
+message UserResponse {
+  string id = 1;
+  string username = 2;
+  string email = 3;
+}
+
+message SearchUsersRequest {
+  string query = 1;
+}
+
+message User {
+  string id = 1;
+  string username = 2;
+  string email = 3;
+}
+
+message SearchUsersResponse {
+  repeated User users = 1;
+}

@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"golang.org/x/crypto/bcrypt"
 
@@ -105,7 +106,7 @@ func (s *AuthService) Login(ctx context.Context, req dto.LoginRequest,
 
 	accessToken, err :=
 		jwtutil.GenerateAccessToken(
-			user.ID.String(),
+			fmt.Sprintf("%d", user.ID),
 			user.Email,
 			user.Role,
 		)
@@ -116,7 +117,7 @@ func (s *AuthService) Login(ctx context.Context, req dto.LoginRequest,
 
 	refreshToken, err :=
 		jwtutil.GenerateRefreshToken(
-			user.ID.String(),
+			fmt.Sprintf("%d", user.ID),
 		)
 
 	if err != nil {
@@ -160,7 +161,7 @@ func (s *AuthService) RefreshToken(
 
 	newAccessToken, err :=
 		jwtutil.GenerateAccessToken(
-			user.ID.String(),
+			fmt.Sprintf("%d", user.ID),
 			user.Email,
 			user.Role,
 		)

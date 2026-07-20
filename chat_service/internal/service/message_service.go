@@ -4,7 +4,9 @@ import (
 	"chat_service/internal/dto"
 	"chat_service/internal/model"
 	"chat_service/internal/repository"
+	"chat_service/internal/websocket"
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 )
@@ -12,16 +14,19 @@ import (
 type MessageService struct {
 	messageRepo      *repository.MessageRepository
 	conversationRepo *repository.ConversationRepository
+	hub              *websocket.Hub
 }
 
 func NewMessageService(
 	messageRepo *repository.MessageRepository,
 	conversationRepo *repository.ConversationRepository,
+	hub *websocket.Hub,
 ) *MessageService {
 
 	return &MessageService{
 		messageRepo:      messageRepo,
 		conversationRepo: conversationRepo,
+		hub:              hub,
 	}
 }
 
@@ -114,6 +119,10 @@ func (s *MessageService) SendMessage(
 	if err != nil {
 		return nil, err
 	}
+	go s.BroadcastMessage(
+		context.Background(),
+		message,
+	)
 
 	return message, nil
 }
@@ -259,10 +268,22 @@ func (s *MessageService) MarkRead(
 
 	// Update status
 
-	return s.messageRepo.MarkRead(
+	err = s.messageRepo.MarkRead(
 		ctx,
 		messageID,
 	)
+
+	if err != nil {
+		return err
+	}
+
+	go s.broadcastReadReceipt(
+		context.Background(),
+		message,
+		userID,
+	)
+
+	return nil
 }
 func (s *MessageService) DeleteMessage(
 	ctx context.Context,
@@ -312,4 +333,255 @@ func (s *MessageService) DeleteMessage(
 	}
 
 	return nil
+}
+func (s *MessageService) BroadcastMessage(
+	ctx context.Context,
+	message *model.Message,
+) {
+
+	participants, err :=
+		s.conversationRepo.GetParticipants(
+			ctx,
+			message.ConversationID,
+		)
+
+	if err != nil {
+		return
+	}
+
+	payload := websocket.MessagePayload{
+		Type:           "message",
+		ConversationID: message.ConversationID,
+		MessageID:      message.ID,
+		SenderID:       message.SenderID,
+		Content:        message.Content,
+		Status:         message.Status,
+	}
+
+	data, err := json.Marshal(payload)
+
+	if err != nil {
+		return
+	}
+
+	for _, participant := range participants {
+
+		if participant.UserID == message.SenderID {
+			continue
+		}
+
+		s.hub.SendToUser(
+			participant.UserID,
+			data,
+		)
+	}
+}
+func (s *MessageService) broadcastReadReceipt(
+	ctx context.Context,
+	message *model.Message,
+	readerID string,
+) {
+
+	participants, err :=
+		s.conversationRepo.GetParticipants(
+			ctx,
+			message.ConversationID,
+		)
+
+	if err != nil {
+		return
+	}
+
+	payload := websocket.ReadReceiptPayload{
+		Type:           "message_read",
+		ConversationID: message.ConversationID,
+		MessageID:      message.ID,
+		UserID:         readerID,
+	}
+
+	data, err := json.Marshal(payload)
+
+	if err != nil {
+		return
+	}
+
+	for _, participant := range participants {
+
+		// Reader ko mat bhejo
+
+		if participant.UserID == readerID {
+			continue
+		}
+
+		s.hub.SendToUser(
+			participant.UserID,
+			data,
+		)
+	}
+}
+func (s *MessageService) BroadcastTyping(
+	ctx context.Context,
+	conversationID uint,
+	userID string,
+	isTyping bool,
+) error {
+
+	if userID == "" {
+		return ErrUserIDRequired
+	}
+
+	allowed, err :=
+		s.conversationRepo.IsParticipant(
+			ctx,
+			conversationID,
+			userID,
+		)
+
+	if err != nil {
+		return err
+	}
+
+	if !allowed {
+		return ErrForbidden
+	}
+
+	eventType := "typing_stop"
+
+	if isTyping {
+		eventType = "typing_start"
+	}
+
+	payload := websocket.TypingPayload{
+		Type:           eventType,
+		ConversationID: conversationID,
+		UserID:         userID,
+	}
+
+	data, err := json.Marshal(
+		payload,
+	)
+
+	if err != nil {
+		return err
+	}
+
+	participants, err :=
+		s.conversationRepo.GetParticipants(
+			ctx,
+			conversationID,
+		)
+
+	if err != nil {
+		return err
+	}
+
+	for _, participant := range participants {
+
+		if participant.UserID == userID {
+			continue
+		}
+
+		s.hub.SendToUser(
+			participant.UserID,
+			data,
+		)
+	}
+
+	return nil
+}
+func (s *MessageService) MarkDelivered(
+	ctx context.Context,
+	userID string,
+	messageID uint,
+) error {
+
+	if userID == "" {
+		return ErrUserIDRequired
+	}
+
+	if messageID == 0 {
+		return ErrMessageIDRequired
+	}
+
+	message, err :=
+		s.messageRepo.GetMessageByID(
+			ctx,
+			messageID,
+		)
+
+	if err != nil {
+		return err
+	}
+
+	if message == nil {
+		return ErrMessageNotFound
+	}
+
+	if message.SenderID == userID {
+		return ErrForbidden
+	}
+
+	err = s.messageRepo.MarkDelivered(
+		ctx,
+		messageID,
+	)
+
+	if err != nil {
+		return err
+	}
+
+	go s.broadcastDelivered(
+		context.Background(),
+		message,
+		userID,
+	)
+
+	return nil
+
+}
+func (s *MessageService) broadcastDelivered(
+	ctx context.Context,
+	message *model.Message,
+	deliveredBy string,
+) {
+
+	participants, err :=
+		s.conversationRepo.GetParticipants(
+			ctx,
+			message.ConversationID,
+		)
+
+	if err != nil {
+		return
+	}
+
+	payload := websocket.DeliveredPayload{
+		Type:           "message_delivered",
+		MessageID:      message.ID,
+		ConversationID: message.ConversationID,
+		UserID:         deliveredBy,
+	}
+
+	data, err := json.Marshal(
+		payload,
+	)
+
+	if err != nil {
+		return
+	}
+
+	for _, participant := range participants {
+
+		// jisne delivered kiya usko mat bhejo
+
+		if participant.UserID == deliveredBy {
+			continue
+		}
+
+		s.hub.SendToUser(
+			participant.UserID,
+			data,
+		)
+	}
+
 }

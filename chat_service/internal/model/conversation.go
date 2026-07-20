@@ -3,21 +3,22 @@ package model
 import "time"
 
 type Conversation struct {
-	ID            uint
-	Type          string // private, group
-	Name          string // group name
+	ID            uint `gorm:"primaryKey"`
+	Type          string
+	Name          string
 	LastMessageID *uint
+
+	Participants []ConversationParticipant `gorm:"foreignKey:ConversationID"`
 
 	CreatedAt time.Time
 	UpdatedAt time.Time
 }
 
 type ConversationParticipant struct {
-	ID             uint
+	ID             uint `gorm:"primaryKey"`
 	ConversationID uint
 	UserID         string
-
-	Role string // member, admin
+	Role           string
 
 	JoinedAt time.Time
 }
