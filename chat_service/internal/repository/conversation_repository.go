@@ -37,15 +37,10 @@ func (r *ConversationRepository) GetConversationByID(
 
 	err := r.DB.
 		WithContext(ctx).
-		Joins(
-			"JOIN conversation_participants cp ON cp.conversation_id = conversations.id",
-		).
-		Where(
-			"cp.user_id = ?",
-			id,
-		).
-		Find(&conversation).
+		Preload("Participants").
+		First(&conversation, id).
 		Error
+
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, nil
 	}
