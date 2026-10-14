@@ -26,15 +26,20 @@ func (c *Client) ReadPump(
 
 	defer func() {
 
-		hub.unregister <- c
+		hub.Unregister(c)
 
-		hub.BroadcastPresence(
-			c.UserID,
-			"offline",
-		)
+		// Only announce offline if the user has no newer connection.
+		if !hub.IsOnline(c.UserID) {
+			hub.BroadcastPresence(
+				c.UserID,
+				"offline",
+			)
+		}
 
 		c.Conn.Close()
 	}()
+
+	c.Conn.SetReadLimit(4096)
 
 	for {
 

@@ -23,10 +23,14 @@ import (
 
 func main() {
 
-	err := godotenv.Load("../../.env")
+	// .env is optional: real environment variables win.
+	for _, path := range []string{".env", "../../.env"} {
+		_ = godotenv.Load(path)
+	}
 
-	if err != nil {
-		log.Fatal(err)
+	if os.Getenv("JWT_ACCESS_SECRET") == "" ||
+		os.Getenv("JWT_REFRESH_SECRET") == "" {
+		log.Fatal("JWT_ACCESS_SECRET and JWT_REFRESH_SECRET must be set")
 	}
 
 	dsn := fmt.Sprintf(

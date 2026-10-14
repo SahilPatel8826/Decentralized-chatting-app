@@ -60,7 +60,8 @@ func (h *Handler) Connect(
 		),
 	}
 
-	h.Hub.register <- client
+	h.Hub.Register(client)
+
 	go h.Hub.BroadcastPresence(
 		client.UserID,
 		"online",

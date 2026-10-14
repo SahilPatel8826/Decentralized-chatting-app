@@ -16,6 +16,14 @@ func AuthMiddleware() gin.HandlerFunc {
 		authHeader :=
 			c.GetHeader("Authorization")
 
+		// Browsers cannot set headers on a WebSocket handshake,
+		// so /ws also accepts ?token=<access token>.
+		if authHeader == "" && c.Request.URL.Path == "/ws" {
+			if t := c.Query("token"); t != "" {
+				authHeader = "Bearer " + t
+			}
+		}
+
 		if authHeader == "" {
 
 			c.JSON(

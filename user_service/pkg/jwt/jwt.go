@@ -7,10 +7,15 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
-var (
-	AccessSecret  = []byte(os.Getenv("JWT_ACCESS_SECRET"))
-	RefreshSecret = []byte(os.Getenv("JWT_REFRESH_SECRET"))
-)
+// Read at call time (not package init) so values loaded
+// from .env in main() are visible.
+func accessSecret() []byte {
+	return []byte(os.Getenv("JWT_ACCESS_SECRET"))
+}
+
+func refreshSecret() []byte {
+	return []byte(os.Getenv("JWT_REFRESH_SECRET"))
+}
 
 type Claims struct {
 	UserID string `json:"user_id"`
@@ -50,7 +55,7 @@ func GenerateAccessToken(
 	)
 
 	return token.SignedString(
-		AccessSecret,
+		accessSecret(),
 	)
 }
 
@@ -79,7 +84,7 @@ func GenerateRefreshToken(
 	)
 
 	return token.SignedString(
-		RefreshSecret,
+		refreshSecret(),
 	)
 }
 func ValidateAccessToken(
@@ -93,8 +98,9 @@ func ValidateAccessToken(
 			token *jwt.Token,
 		) (interface{}, error) {
 
-			return AccessSecret, nil
+			return accessSecret(), nil
 		},
+		jwt.WithValidMethods([]string{"HS256"}),
 	)
 
 	if err != nil {
@@ -121,8 +127,9 @@ func ValidateRefreshToken(
 			token *jwt.Token,
 		) (interface{}, error) {
 
-			return RefreshSecret, nil
+			return refreshSecret(), nil
 		},
+		jwt.WithValidMethods([]string{"HS256"}),
 	)
 
 	if err != nil {

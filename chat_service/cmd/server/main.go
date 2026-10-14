@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -25,9 +26,13 @@ import (
 
 func main() {
 
-	err := godotenv.Load("../../.env")
-	if err != nil {
-		log.Fatal(err)
+	// .env is optional: real environment variables win.
+	for _, path := range []string{".env", "../../.env"} {
+		_ = godotenv.Load(path)
+	}
+
+	if os.Getenv("JWT_ACCESS_SECRET") == "" {
+		log.Fatal("JWT_ACCESS_SECRET is not set")
 	}
 
 	dsn := fmt.Sprintf(
@@ -61,8 +66,6 @@ func main() {
 
 	hub := websocket.NewHub()
 
-	go hub.Run()
-
 	// ==========================
 	// Repositories
 	// ==========================
@@ -76,6 +79,32 @@ func main() {
 		repository.NewMessageRepository(
 			db,
 		)
+
+	hub.Participants = func(conversationID uint) []string {
+		list, err := conversationRepo.GetParticipants(
+			context.Background(),
+			conversationID,
+		)
+		if err != nil {
+			return nil
+		}
+		ids := make([]string, 0, len(list))
+		for _, p := range list {
+			ids = append(ids, p.UserID)
+		}
+		return ids
+	}
+
+	hub.Contacts = func(userID string) []string {
+		ids, err := conversationRepo.GetContactIDs(
+			context.Background(),
+			userID,
+		)
+		if err != nil {
+			return nil
+		}
+		return ids
+	}
 
 	// ==========================
 	// gRPC User Service Client

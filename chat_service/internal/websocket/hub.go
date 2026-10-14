@@ -1,140 +1,92 @@
 package websocket
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"sync"
+)
 
+// Hub tracks connected clients (one connection per user).
+// All access to clients goes through mu.
 type Hub struct {
+	mu      sync.RWMutex
 	clients map[string]*Client
 
-	register chan *Client
-
-	unregister chan *Client
-
-	broadcast chan []byte
+	// Set from main. Hub stays decoupled from the database.
+	// Participants returns the user IDs in a conversation.
+	Participants func(conversationID uint) []string
+	// Contacts returns the user IDs that share a conversation with userID.
+	Contacts func(userID string) []string
 }
 
 func NewHub() *Hub {
-
 	return &Hub{
 		clients: make(map[string]*Client),
-
-		register: make(chan *Client),
-
-		unregister: make(chan *Client),
-
-		broadcast: make(chan []byte),
 	}
 }
 
-func (h *Hub) Run() {
+// Register adds a client. If the user is already connected,
+// the old connection is closed and replaced.
+func (h *Hub) Register(c *Client) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
 
-	for {
+	if old, ok := h.clients[c.UserID]; ok {
+		delete(h.clients, c.UserID)
+		close(old.Send)
+	}
 
+	h.clients[c.UserID] = c
+}
+
+// Unregister removes c only if it is still the active
+// connection for that user (a newer connection stays).
+func (h *Hub) Unregister(c *Client) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if cur, ok := h.clients[c.UserID]; ok && cur == c {
+		delete(h.clients, c.UserID)
+		close(c.Send)
+	}
+}
+
+// SendToUser does a non-blocking send. A client whose buffer
+// is full is dropped.
+func (h *Hub) SendToUser(userID string, message []byte) {
+	h.mu.RLock()
+	c, ok := h.clients[userID]
+	sent := false
+	if ok {
 		select {
-
-		case client := <-h.register:
-
-			h.clients[client.UserID] = client
-
-		case client := <-h.unregister:
-
-			if _, ok := h.clients[client.UserID]; ok {
-
-				delete(
-					h.clients,
-					client.UserID,
-				)
-
-				close(client.Send)
-			}
-
-		case message := <-h.broadcast:
-
-			for _, client := range h.clients {
-
-				select {
-
-				case client.Send <- message:
-
-				default:
-
-					close(client.Send)
-
-					delete(
-						h.clients,
-						client.UserID,
-					)
-				}
-			}
+		case c.Send <- message:
+			sent = true
+		default:
 		}
 	}
-}
+	h.mu.RUnlock()
 
-func (h *Hub) SendToUser(
-	userID string,
-	message []byte,
-) {
-
-	client, ok := h.clients[userID]
-
-	if !ok {
-		return
-	}
-
-	select {
-
-	case client.Send <- message:
-
-	default:
-		close(client.Send)
-		delete(h.clients, userID)
+	if ok && !sent {
+		h.Unregister(c)
 	}
 }
-func (h *Hub) IsOnline(
-	userID string,
-) bool {
+
+func (h *Hub) IsOnline(userID string) bool {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
 
 	_, ok := h.clients[userID]
-
 	return ok
 }
+
 func (h *Hub) OnlineUsers() []string {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
 
-	users := make(
-		[]string,
-		0,
-	)
-
-	for userID := range h.clients {
-
-		users = append(
-			users,
-			userID,
-		)
+	users := make([]string, 0, len(h.clients))
+	for id := range h.clients {
+		users = append(users, id)
 	}
-
 	return users
-}
-func (h *Hub) Broadcast(
-	message []byte,
-) {
-
-	for _, client := range h.clients {
-
-		select {
-
-		case client.Send <- message:
-
-		default:
-
-			close(client.Send)
-
-			delete(
-				h.clients,
-				client.UserID,
-			)
-		}
-	}
-
 }
 
 type PresencePayload struct {
@@ -143,54 +95,67 @@ type PresencePayload struct {
 	Status string `json:"status"`
 }
 
-func (h *Hub) BroadcastPresence(
-	userID string,
-	status string,
-) {
+// BroadcastPresence notifies only the user's contacts.
+func (h *Hub) BroadcastPresence(userID string, status string) {
+	if h.Contacts == nil {
+		return
+	}
 
-	payload := PresencePayload{
+	data, err := json.Marshal(PresencePayload{
 		Type:   "presence",
 		UserID: userID,
 		Status: status,
-	}
-
-	data, err := json.Marshal(
-		payload,
-	)
-
+	})
 	if err != nil {
 		return
 	}
 
-	h.Broadcast(data)
-
+	for _, id := range h.Contacts(userID) {
+		h.SendToUser(id, data)
+	}
 }
+
+// BroadcastTyping notifies the other participants of the
+// conversation. Ignored if the sender is not a participant.
 func (h *Hub) BroadcastTyping(
 	conversationID uint,
 	userID string,
 	isTyping bool,
 ) {
+	if h.Participants == nil {
+		return
+	}
+
+	participants := h.Participants(conversationID)
+
+	member := false
+	for _, id := range participants {
+		if id == userID {
+			member = true
+			break
+		}
+	}
+	if !member {
+		return
+	}
 
 	eventType := "typing_stop"
-
 	if isTyping {
 		eventType = "typing_start"
 	}
 
-	payload := TypingPayload{
+	data, err := json.Marshal(TypingPayload{
 		Type:           eventType,
 		ConversationID: conversationID,
 		UserID:         userID,
-	}
-
-	data, err := json.Marshal(
-		payload,
-	)
-
+	})
 	if err != nil {
 		return
 	}
 
-	h.Broadcast(data)
-
+	for _, id := range participants {
+		if id != userID {
+			h.SendToUser(id, data)
+		}
+	}
 }

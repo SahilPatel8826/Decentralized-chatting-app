@@ -212,3 +212,29 @@ func (r *ConversationRepository) RemoveParticipant(
 		).
 		Error
 }
+
+// GetContactIDs returns every user who shares at least one
+// conversation with userID (used to scope presence events).
+func (r *ConversationRepository) GetContactIDs(
+	ctx context.Context,
+	userID string,
+) ([]string, error) {
+
+	var ids []string
+
+	sub := r.DB.
+		Model(&model.ConversationParticipant{}).
+		Select("conversation_id").
+		Where("user_id = ?", userID)
+
+	err := r.DB.
+		WithContext(ctx).
+		Model(&model.ConversationParticipant{}).
+		Distinct().
+		Where("conversation_id IN (?)", sub).
+		Where("user_id <> ?", userID).
+		Pluck("user_id", &ids).
+		Error
+
+	return ids, err
+}
