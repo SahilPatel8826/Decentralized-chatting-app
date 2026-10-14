@@ -1,0 +1,1324 @@
+diff --git a/RUNNING.md b/RUNNING.md
+new file mode 100644
+index 0000000..9cf39f4
+--- /dev/null
++++ b/RUNNING.md
+@@ -0,0 +1,12 @@
++# Running locally (Day 1)
++
++1. Start Postgres and create the database (`createdb chat_db`).
++2. `cp user_service/.env.example user_service/.env` and
++   `cp chat_service/.env.example chat_service/.env`. Edit the values.
++   `JWT_ACCESS_SECRET` must be the same in both files.
++3. Terminal 1: `cd user_service && go run ./cmd/server`  (HTTP :8080, gRPC :50051)
++4. Terminal 2: `cd chat_service && go run ./cmd/server`  (HTTP/WS :8081)
++5. Smoke test: `bash scripts/smoke_test.sh`
++6. Live check with two terminals:
++   `wscat -c "ws://localhost:8081/ws?token=<TOKEN_B>"`
++   then send a message as user A (see the script output) and watch it arrive.
+diff --git a/chat_service/.env.example b/chat_service/.env.example
+new file mode 100644
+index 0000000..9edb405
+--- /dev/null
++++ b/chat_service/.env.example
+@@ -0,0 +1,7 @@
++DB_HOST=localhost
++DB_USER=postgres
++DB_PASSWORD=postgres
++DB_NAME=chat_db
++DB_PORT=5432
++# Must be identical in user_service/.env
++JWT_ACCESS_SECRET=change-me-long-random-string
+diff --git a/chat_service/cmd/server/main.go b/chat_service/cmd/server/main.go
+index 9907458..86458ce 100644
+--- a/chat_service/cmd/server/main.go
++++ b/chat_service/cmd/server/main.go
+@@ -1,6 +1,7 @@
+ package main
+ 
+ import (
++	"context"
+ 	"fmt"
+ 	"log"
+ 	"os"
+@@ -25,9 +26,13 @@ import (
+ 
+ func main() {
+ 
+-	err := godotenv.Load("../../.env")
+-	if err != nil {
+-		log.Fatal(err)
++	// .env is optional: real environment variables win.
++	for _, path := range []string{".env", "../../.env"} {
++		_ = godotenv.Load(path)
++	}
++
++	if os.Getenv("JWT_ACCESS_SECRET") == "" {
++		log.Fatal("JWT_ACCESS_SECRET is not set")
+ 	}
+ 
+ 	dsn := fmt.Sprintf(
+@@ -61,8 +66,6 @@ func main() {
+ 
+ 	hub := websocket.NewHub()
+ 
+-	go hub.Run()
+-
+ 	// ==========================
+ 	// Repositories
+ 	// ==========================
+@@ -77,6 +80,32 @@ func main() {
+ 			db,
+ 		)
+ 
++	hub.Participants = func(conversationID uint) []string {
++		list, err := conversationRepo.GetParticipants(
++			context.Background(),
++			conversationID,
++		)
++		if err != nil {
++			return nil
++		}
++		ids := make([]string, 0, len(list))
++		for _, p := range list {
++			ids = append(ids, p.UserID)
++		}
++		return ids
++	}
++
++	hub.Contacts = func(userID string) []string {
++		ids, err := conversationRepo.GetContactIDs(
++			context.Background(),
++			userID,
++		)
++		if err != nil {
++			return nil
++		}
++		return ids
++	}
++
+ 	// ==========================
+ 	// gRPC User Service Client
+ 	// ==========================
+diff --git a/chat_service/internal/middleware/auth_middleware.go b/chat_service/internal/middleware/auth_middleware.go
+index d42ee5c..5dfaffa 100644
+--- a/chat_service/internal/middleware/auth_middleware.go
++++ b/chat_service/internal/middleware/auth_middleware.go
+@@ -16,6 +16,14 @@ func AuthMiddleware() gin.HandlerFunc {
+ 		authHeader :=
+ 			c.GetHeader("Authorization")
+ 
++		// Browsers cannot set headers on a WebSocket handshake,
++		// so /ws also accepts ?token=<access token>.
++		if authHeader == "" && c.Request.URL.Path == "/ws" {
++			if t := c.Query("token"); t != "" {
++				authHeader = "Bearer " + t
++			}
++		}
++
+ 		if authHeader == "" {
+ 
+ 			c.JSON(
+diff --git a/chat_service/internal/middleware/auth_middleware_test.go b/chat_service/internal/middleware/auth_middleware_test.go
+new file mode 100644
+index 0000000..5edd39b
+--- /dev/null
++++ b/chat_service/internal/middleware/auth_middleware_test.go
+@@ -0,0 +1,86 @@
++package middleware
++
++import (
++	"net/http"
++	"net/http/httptest"
++	"testing"
++	"time"
++
++	"chat_service/pkg/jwtutil"
++
++	"github.com/gin-gonic/gin"
++	"github.com/golang-jwt/jwt/v5"
++)
++
++const secret = "mw-test-secret"
++
++func token(t *testing.T) string {
++	t.Helper()
++	claims := &jwtutil.Claims{
++		UserID: "7",
++		RegisteredClaims: jwt.RegisteredClaims{
++			ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
++		},
++	}
++	s, err := jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString([]byte(secret))
++	if err != nil {
++		t.Fatal(err)
++	}
++	return s
++}
++
++func setup() *gin.Engine {
++	gin.SetMode(gin.TestMode)
++	r := gin.New()
++	h := func(c *gin.Context) { c.String(200, c.GetString("userID")) }
++	r.GET("/ws", AuthMiddleware(), h)
++	r.GET("/other", AuthMiddleware(), h)
++	return r
++}
++
++func do(r *gin.Engine, path, auth string) *httptest.ResponseRecorder {
++	req := httptest.NewRequest(http.MethodGet, path, nil)
++	if auth != "" {
++		req.Header.Set("Authorization", auth)
++	}
++	w := httptest.NewRecorder()
++	r.ServeHTTP(w, req)
++	return w
++}
++
++func TestMissingTokenRejected(t *testing.T) {
++	t.Setenv("JWT_ACCESS_SECRET", secret)
++	if w := do(setup(), "/other", ""); w.Code != 401 {
++		t.Fatalf("want 401, got %d", w.Code)
++	}
++}
++
++func TestHeaderTokenAccepted(t *testing.T) {
++	t.Setenv("JWT_ACCESS_SECRET", secret)
++	w := do(setup(), "/other", "Bearer "+token(t))
++	if w.Code != 200 || w.Body.String() != "7" {
++		t.Fatalf("want 200/7, got %d/%s", w.Code, w.Body.String())
++	}
++}
++
++func TestWSQueryTokenAccepted(t *testing.T) {
++	t.Setenv("JWT_ACCESS_SECRET", secret)
++	w := do(setup(), "/ws?token="+token(t), "")
++	if w.Code != 200 || w.Body.String() != "7" {
++		t.Fatalf("want 200/7, got %d/%s", w.Code, w.Body.String())
++	}
++}
++
++func TestQueryTokenRejectedOnOtherRoutes(t *testing.T) {
++	t.Setenv("JWT_ACCESS_SECRET", secret)
++	if w := do(setup(), "/other?token="+token(t), ""); w.Code != 401 {
++		t.Fatalf("query token must only work on /ws, got %d", w.Code)
++	}
++}
++
++func TestBadTokenRejected(t *testing.T) {
++	t.Setenv("JWT_ACCESS_SECRET", secret)
++	if w := do(setup(), "/ws?token=garbage", ""); w.Code != 401 {
++		t.Fatalf("want 401, got %d", w.Code)
++	}
++}
+diff --git a/chat_service/internal/repository/conversation_repository.go b/chat_service/internal/repository/conversation_repository.go
+index 942ae69..02b5927 100644
+--- a/chat_service/internal/repository/conversation_repository.go
++++ b/chat_service/internal/repository/conversation_repository.go
+@@ -37,15 +37,10 @@ func (r *ConversationRepository) GetConversationByID(
+ 
+ 	err := r.DB.
+ 		WithContext(ctx).
+-		Joins(
+-			"JOIN conversation_participants cp ON cp.conversation_id = conversations.id",
+-		).
+-		Where(
+-			"cp.user_id = ?",
+-			id,
+-		).
+-		Find(&conversation).
++		Preload("Participants").
++		First(&conversation, id).
+ 		Error
++
+ 	if errors.Is(err, gorm.ErrRecordNotFound) {
+ 		return nil, nil
+ 	}
+@@ -217,3 +212,29 @@ func (r *ConversationRepository) RemoveParticipant(
+ 		).
+ 		Error
+ }
++
++// GetContactIDs returns every user who shares at least one
++// conversation with userID (used to scope presence events).
++func (r *ConversationRepository) GetContactIDs(
++	ctx context.Context,
++	userID string,
++) ([]string, error) {
++
++	var ids []string
++
++	sub := r.DB.
++		Model(&model.ConversationParticipant{}).
++		Select("conversation_id").
++		Where("user_id = ?", userID)
++
++	err := r.DB.
++		WithContext(ctx).
++		Model(&model.ConversationParticipant{}).
++		Distinct().
++		Where("conversation_id IN (?)", sub).
++		Where("user_id <> ?", userID).
++		Pluck("user_id", &ids).
++		Error
++
++	return ids, err
++}
+diff --git a/chat_service/internal/websocket/client.go b/chat_service/internal/websocket/client.go
+index c2c4101..0fc3fc7 100644
+--- a/chat_service/internal/websocket/client.go
++++ b/chat_service/internal/websocket/client.go
+@@ -26,16 +26,21 @@ func (c *Client) ReadPump(
+ 
+ 	defer func() {
+ 
+-		hub.unregister <- c
++		hub.Unregister(c)
+ 
+-		hub.BroadcastPresence(
+-			c.UserID,
+-			"offline",
+-		)
++		// Only announce offline if the user has no newer connection.
++		if !hub.IsOnline(c.UserID) {
++			hub.BroadcastPresence(
++				c.UserID,
++				"offline",
++			)
++		}
+ 
+ 		c.Conn.Close()
+ 	}()
+ 
++	c.Conn.SetReadLimit(4096)
++
+ 	for {
+ 
+ 		_, data, err :=
+diff --git a/chat_service/internal/websocket/handler.go b/chat_service/internal/websocket/handler.go
+index 9c4f333..b0d0e81 100644
+--- a/chat_service/internal/websocket/handler.go
++++ b/chat_service/internal/websocket/handler.go
+@@ -60,7 +60,8 @@ func (h *Handler) Connect(
+ 		),
+ 	}
+ 
+-	h.Hub.register <- client
++	h.Hub.Register(client)
++
+ 	go h.Hub.BroadcastPresence(
+ 		client.UserID,
+ 		"online",
+diff --git a/chat_service/internal/websocket/hub.go b/chat_service/internal/websocket/hub.go
+index e6f2390..6dafac4 100644
+--- a/chat_service/internal/websocket/hub.go
++++ b/chat_service/internal/websocket/hub.go
+@@ -1,141 +1,93 @@
+ package websocket
+ 
+-import "encoding/json"
++import (
++	"encoding/json"
++	"sync"
++)
+ 
++// Hub tracks connected clients (one connection per user).
++// All access to clients goes through mu.
+ type Hub struct {
++	mu      sync.RWMutex
+ 	clients map[string]*Client
+ 
+-	register chan *Client
+-
+-	unregister chan *Client
+-
+-	broadcast chan []byte
++	// Set from main. Hub stays decoupled from the database.
++	// Participants returns the user IDs in a conversation.
++	Participants func(conversationID uint) []string
++	// Contacts returns the user IDs that share a conversation with userID.
++	Contacts func(userID string) []string
+ }
+ 
+ func NewHub() *Hub {
+-
+ 	return &Hub{
+ 		clients: make(map[string]*Client),
+-
+-		register: make(chan *Client),
+-
+-		unregister: make(chan *Client),
+-
+-		broadcast: make(chan []byte),
+ 	}
+ }
+ 
+-func (h *Hub) Run() {
+-
+-	for {
+-
+-		select {
+-
+-		case client := <-h.register:
++// Register adds a client. If the user is already connected,
++// the old connection is closed and replaced.
++func (h *Hub) Register(c *Client) {
++	h.mu.Lock()
++	defer h.mu.Unlock()
+ 
+-			h.clients[client.UserID] = client
+-
+-		case client := <-h.unregister:
+-
+-			if _, ok := h.clients[client.UserID]; ok {
+-
+-				delete(
+-					h.clients,
+-					client.UserID,
+-				)
+-
+-				close(client.Send)
+-			}
+-
+-		case message := <-h.broadcast:
+-
+-			for _, client := range h.clients {
+-
+-				select {
+-
+-				case client.Send <- message:
++	if old, ok := h.clients[c.UserID]; ok {
++		delete(h.clients, c.UserID)
++		close(old.Send)
++	}
+ 
+-				default:
++	h.clients[c.UserID] = c
++}
+ 
+-					close(client.Send)
++// Unregister removes c only if it is still the active
++// connection for that user (a newer connection stays).
++func (h *Hub) Unregister(c *Client) {
++	h.mu.Lock()
++	defer h.mu.Unlock()
+ 
+-					delete(
+-						h.clients,
+-						client.UserID,
+-					)
+-				}
+-			}
+-		}
++	if cur, ok := h.clients[c.UserID]; ok && cur == c {
++		delete(h.clients, c.UserID)
++		close(c.Send)
+ 	}
+ }
+ 
+-func (h *Hub) SendToUser(
+-	userID string,
+-	message []byte,
+-) {
+-
+-	client, ok := h.clients[userID]
+-
+-	if !ok {
+-		return
++// SendToUser does a non-blocking send. A client whose buffer
++// is full is dropped.
++func (h *Hub) SendToUser(userID string, message []byte) {
++	h.mu.RLock()
++	c, ok := h.clients[userID]
++	sent := false
++	if ok {
++		select {
++		case c.Send <- message:
++			sent = true
++		default:
++		}
+ 	}
++	h.mu.RUnlock()
+ 
+-	select {
+-
+-	case client.Send <- message:
+-
+-	default:
+-		close(client.Send)
+-		delete(h.clients, userID)
++	if ok && !sent {
++		h.Unregister(c)
+ 	}
+ }
+-func (h *Hub) IsOnline(
+-	userID string,
+-) bool {
+ 
+-	_, ok := h.clients[userID]
++func (h *Hub) IsOnline(userID string) bool {
++	h.mu.RLock()
++	defer h.mu.RUnlock()
+ 
++	_, ok := h.clients[userID]
+ 	return ok
+ }
+-func (h *Hub) OnlineUsers() []string {
+-
+-	users := make(
+-		[]string,
+-		0,
+-	)
+ 
+-	for userID := range h.clients {
++func (h *Hub) OnlineUsers() []string {
++	h.mu.RLock()
++	defer h.mu.RUnlock()
+ 
+-		users = append(
+-			users,
+-			userID,
+-		)
++	users := make([]string, 0, len(h.clients))
++	for id := range h.clients {
++		users = append(users, id)
+ 	}
+-
+ 	return users
+ }
+-func (h *Hub) Broadcast(
+-	message []byte,
+-) {
+-
+-	for _, client := range h.clients {
+-
+-		select {
+-
+-		case client.Send <- message:
+-
+-		default:
+-
+-			close(client.Send)
+-
+-			delete(
+-				h.clients,
+-				client.UserID,
+-			)
+-		}
+-	}
+-
+-}
+ 
+ type PresencePayload struct {
+ 	Type   string `json:"type"`
+@@ -143,54 +95,67 @@ type PresencePayload struct {
+ 	Status string `json:"status"`
+ }
+ 
+-func (h *Hub) BroadcastPresence(
+-	userID string,
+-	status string,
+-) {
++// BroadcastPresence notifies only the user's contacts.
++func (h *Hub) BroadcastPresence(userID string, status string) {
++	if h.Contacts == nil {
++		return
++	}
+ 
+-	payload := PresencePayload{
++	data, err := json.Marshal(PresencePayload{
+ 		Type:   "presence",
+ 		UserID: userID,
+ 		Status: status,
+-	}
+-
+-	data, err := json.Marshal(
+-		payload,
+-	)
+-
++	})
+ 	if err != nil {
+ 		return
+ 	}
+ 
+-	h.Broadcast(data)
+-
++	for _, id := range h.Contacts(userID) {
++		h.SendToUser(id, data)
++	}
+ }
++
++// BroadcastTyping notifies the other participants of the
++// conversation. Ignored if the sender is not a participant.
+ func (h *Hub) BroadcastTyping(
+ 	conversationID uint,
+ 	userID string,
+ 	isTyping bool,
+ ) {
++	if h.Participants == nil {
++		return
++	}
+ 
+-	eventType := "typing_stop"
++	participants := h.Participants(conversationID)
+ 
++	member := false
++	for _, id := range participants {
++		if id == userID {
++			member = true
++			break
++		}
++	}
++	if !member {
++		return
++	}
++
++	eventType := "typing_stop"
+ 	if isTyping {
+ 		eventType = "typing_start"
+ 	}
+ 
+-	payload := TypingPayload{
++	data, err := json.Marshal(TypingPayload{
+ 		Type:           eventType,
+ 		ConversationID: conversationID,
+ 		UserID:         userID,
+-	}
+-
+-	data, err := json.Marshal(
+-		payload,
+-	)
+-
++	})
+ 	if err != nil {
+ 		return
+ 	}
+ 
+-	h.Broadcast(data)
+-
++	for _, id := range participants {
++		if id != userID {
++			h.SendToUser(id, data)
++		}
++	}
+ }
+diff --git a/chat_service/internal/websocket/hub_test.go b/chat_service/internal/websocket/hub_test.go
+new file mode 100644
+index 0000000..28353fb
+--- /dev/null
++++ b/chat_service/internal/websocket/hub_test.go
+@@ -0,0 +1,210 @@
++package websocket
++
++import (
++	"encoding/json"
++	"strconv"
++	"sync"
++	"testing"
++	"time"
++)
++
++func newClient(id string) *Client {
++	return &Client{UserID: id, Send: make(chan []byte, 8)}
++}
++
++// recv returns (message, true) or (nil, false) if nothing arrives,
++// or the channel is closed.
++func recv(c *Client) ([]byte, bool) {
++	select {
++	case m, ok := <-c.Send:
++		return m, ok
++	case <-time.After(100 * time.Millisecond):
++		return nil, false
++	}
++}
++
++func TestRegisterAndIsOnline(t *testing.T) {
++	h := NewHub()
++	c := newClient("1")
++
++	if h.IsOnline("1") {
++		t.Fatal("user should be offline before register")
++	}
++	h.Register(c)
++	if !h.IsOnline("1") {
++		t.Fatal("user should be online after register")
++	}
++}
++
++func TestRegisterReplacesOldConnection(t *testing.T) {
++	h := NewHub()
++	oldC, newC := newClient("1"), newClient("1")
++
++	h.Register(oldC)
++	h.Register(newC)
++
++	if _, ok := <-oldC.Send; ok {
++		t.Fatal("old connection's Send channel should be closed")
++	}
++	if !h.IsOnline("1") {
++		t.Fatal("user should still be online via the new connection")
++	}
++}
++
++func TestUnregisterIgnoresStaleClient(t *testing.T) {
++	h := NewHub()
++	oldC, newC := newClient("1"), newClient("1")
++
++	h.Register(oldC)
++	h.Register(newC)
++	h.Unregister(oldC) // stale: must not remove the new connection
++
++	if !h.IsOnline("1") {
++		t.Fatal("stale Unregister removed the active connection")
++	}
++	select {
++	case _, ok := <-newC.Send:
++		if !ok {
++			t.Fatal("new connection's Send channel was closed")
++		}
++	default:
++	}
++}
++
++func TestSendToUser(t *testing.T) {
++	h := NewHub()
++	c := newClient("1")
++	h.Register(c)
++
++	h.SendToUser("1", []byte("hi"))
++	if m, ok := recv(c); !ok || string(m) != "hi" {
++		t.Fatalf("expected hi, got %q ok=%v", m, ok)
++	}
++
++	// offline user: must not panic
++	h.SendToUser("999", []byte("nobody"))
++}
++
++func TestSendToUserDropsFullClient(t *testing.T) {
++	h := NewHub()
++	c := &Client{UserID: "1", Send: make(chan []byte, 1)}
++	h.Register(c)
++
++	h.SendToUser("1", []byte("a")) // fills buffer
++	h.SendToUser("1", []byte("b")) // buffer full -> dropped
++
++	if h.IsOnline("1") {
++		t.Fatal("slow client should have been dropped")
++	}
++}
++
++func TestTypingOnlyToOtherParticipants(t *testing.T) {
++	h := NewHub()
++	h.Participants = func(conversationID uint) []string {
++		return []string{"1", "2"}
++	}
++	c1, c2, c3 := newClient("1"), newClient("2"), newClient("3")
++	h.Register(c1)
++	h.Register(c2)
++	h.Register(c3)
++
++	h.BroadcastTyping(10, "1", true)
++
++	m, ok := recv(c2)
++	if !ok {
++		t.Fatal("participant 2 should receive typing event")
++	}
++	var p TypingPayload
++	if err := json.Unmarshal(m, &p); err != nil {
++		t.Fatal(err)
++	}
++	if p.Type != "typing_start" || p.ConversationID != 10 || p.UserID != "1" {
++		t.Fatalf("unexpected payload: %+v", p)
++	}
++	if _, ok := recv(c1); ok {
++		t.Fatal("sender should not receive own typing event")
++	}
++	if _, ok := recv(c3); ok {
++		t.Fatal("non-participant must not receive typing event")
++	}
++}
++
++func TestTypingIgnoredFromNonParticipant(t *testing.T) {
++	h := NewHub()
++	h.Participants = func(uint) []string { return []string{"1", "2"} }
++	c1, c2, c3 := newClient("1"), newClient("2"), newClient("3")
++	h.Register(c1)
++	h.Register(c2)
++	h.Register(c3)
++
++	h.BroadcastTyping(10, "3", true)
++
++	for _, c := range []*Client{c1, c2, c3} {
++		if _, ok := recv(c); ok {
++			t.Fatalf("user %s got an event from a non-participant", c.UserID)
++		}
++	}
++}
++
++func TestPresenceOnlyToContacts(t *testing.T) {
++	h := NewHub()
++	h.Contacts = func(userID string) []string { return []string{"2"} }
++	c1, c2, c3 := newClient("1"), newClient("2"), newClient("3")
++	h.Register(c1)
++	h.Register(c2)
++	h.Register(c3)
++
++	h.BroadcastPresence("1", "online")
++
++	m, ok := recv(c2)
++	if !ok {
++		t.Fatal("contact should receive presence")
++	}
++	var p PresencePayload
++	if err := json.Unmarshal(m, &p); err != nil {
++		t.Fatal(err)
++	}
++	if p.Type != "presence" || p.UserID != "1" || p.Status != "online" {
++		t.Fatalf("unexpected payload: %+v", p)
++	}
++	if _, ok := recv(c3); ok {
++		t.Fatal("non-contact must not receive presence")
++	}
++}
++
++func TestNilLookupsDoNotPanic(t *testing.T) {
++	h := NewHub()
++	h.BroadcastTyping(1, "1", true)
++	h.BroadcastPresence("1", "online")
++}
++
++// Run with: go test -race ./...
++func TestConcurrentAccess(t *testing.T) {
++	h := NewHub()
++	h.Contacts = func(string) []string { return []string{"1", "2", "3"} }
++	h.Participants = func(uint) []string { return []string{"1", "2", "3"} }
++
++	var wg sync.WaitGroup
++	for i := 0; i < 50; i++ {
++		wg.Add(3)
++		id := strconv.Itoa(i % 5)
++		go func() {
++			defer wg.Done()
++			c := &Client{UserID: id, Send: make(chan []byte, 256)}
++			h.Register(c)
++			h.Unregister(c)
++		}()
++		go func() {
++			defer wg.Done()
++			h.SendToUser(id, []byte("x"))
++			h.IsOnline(id)
++			h.OnlineUsers()
++		}()
++		go func() {
++			defer wg.Done()
++			h.BroadcastPresence(id, "online")
++			h.BroadcastTyping(1, "1", true)
++		}()
++	}
++	wg.Wait()
++}
+diff --git a/chat_service/pkg/jwtutil/jwt.go b/chat_service/pkg/jwtutil/jwt.go
+index c9e08e9..d6aedc9 100644
+--- a/chat_service/pkg/jwtutil/jwt.go
++++ b/chat_service/pkg/jwtutil/jwt.go
+@@ -1,14 +1,17 @@
+ package jwtutil
+ 
+ import (
++	"errors"
+ 	"os"
+ 
+ 	"github.com/golang-jwt/jwt/v5"
+ )
+ 
+-var AccessSecret = []byte(
+-	os.Getenv("JWT_ACCESS_SECRET"),
+-)
++// Read at call time (not package init) so values loaded
++// from .env in main() are visible.
++func accessSecret() []byte {
++	return []byte(os.Getenv("JWT_ACCESS_SECRET"))
++}
+ 
+ type Claims struct {
+ 	UserID string `json:"user_id"`
+@@ -24,28 +27,28 @@ func ValidateAccessToken(
+ 	tokenString string,
+ ) (*Claims, error) {
+ 
++	secret := accessSecret()
++	if len(secret) == 0 {
++		return nil, errors.New("jwt secret not configured")
++	}
++
+ 	token, err := jwt.ParseWithClaims(
+ 		tokenString,
+ 		&Claims{},
+-		func(
+-			token *jwt.Token,
+-		) (interface{}, error) {
+-
+-			return AccessSecret, nil
++		func(token *jwt.Token) (interface{}, error) {
++			return secret, nil
+ 		},
++		jwt.WithValidMethods([]string{"HS256"}),
+ 	)
+ 
+ 	if err != nil {
+ 		return nil, err
+ 	}
+ 
+-	claims, ok :=
+-		token.Claims.(*Claims)
++	claims, ok := token.Claims.(*Claims)
+ 
+ 	if !ok || !token.Valid {
+-
+-		return nil,
+-			jwt.ErrTokenInvalidClaims
++		return nil, jwt.ErrTokenInvalidClaims
+ 	}
+ 
+ 	return claims, nil
+diff --git a/chat_service/pkg/jwtutil/jwt_test.go b/chat_service/pkg/jwtutil/jwt_test.go
+new file mode 100644
+index 0000000..f8261f5
+--- /dev/null
++++ b/chat_service/pkg/jwtutil/jwt_test.go
+@@ -0,0 +1,93 @@
++package jwtutil
++
++import (
++	"testing"
++	"time"
++
++	"github.com/golang-jwt/jwt/v5"
++)
++
++const testSecret = "test-secret"
++
++func sign(t *testing.T, method jwt.SigningMethod, secret string, exp time.Time) string {
++	t.Helper()
++	claims := &Claims{
++		UserID: "42",
++		Email:  "a@test.com",
++		Role:   "user",
++		RegisteredClaims: jwt.RegisteredClaims{
++			ExpiresAt: jwt.NewNumericDate(exp),
++		},
++	}
++	s, err := jwt.NewWithClaims(method, claims).SignedString([]byte(secret))
++	if err != nil {
++		t.Fatal(err)
++	}
++	return s
++}
++
++func TestValidToken(t *testing.T) {
++	t.Setenv("JWT_ACCESS_SECRET", testSecret)
++	tok := sign(t, jwt.SigningMethodHS256, testSecret, time.Now().Add(time.Hour))
++
++	c, err := ValidateAccessToken(tok)
++	if err != nil {
++		t.Fatalf("expected valid token, got %v", err)
++	}
++	if c.UserID != "42" || c.Email != "a@test.com" || c.Role != "user" {
++		t.Fatalf("unexpected claims: %+v", c)
++	}
++}
++
++func TestSecretReadAtCallTime(t *testing.T) {
++	// Regression: secret used to be captured at package init.
++	tok := sign(t, jwt.SigningMethodHS256, "late-secret", time.Now().Add(time.Hour))
++	t.Setenv("JWT_ACCESS_SECRET", "late-secret")
++
++	if _, err := ValidateAccessToken(tok); err != nil {
++		t.Fatalf("secret set after init should work: %v", err)
++	}
++}
++
++func TestWrongSecretRejected(t *testing.T) {
++	t.Setenv("JWT_ACCESS_SECRET", testSecret)
++	tok := sign(t, jwt.SigningMethodHS256, "other-secret", time.Now().Add(time.Hour))
++
++	if _, err := ValidateAccessToken(tok); err == nil {
++		t.Fatal("token signed with another secret must be rejected")
++	}
++}
++
++func TestExpiredRejected(t *testing.T) {
++	t.Setenv("JWT_ACCESS_SECRET", testSecret)
++	tok := sign(t, jwt.SigningMethodHS256, testSecret, time.Now().Add(-time.Minute))
++
++	if _, err := ValidateAccessToken(tok); err == nil {
++		t.Fatal("expired token must be rejected")
++	}
++}
++
++func TestOtherAlgorithmRejected(t *testing.T) {
++	t.Setenv("JWT_ACCESS_SECRET", testSecret)
++	tok := sign(t, jwt.SigningMethodHS512, testSecret, time.Now().Add(time.Hour))
++
++	if _, err := ValidateAccessToken(tok); err == nil {
++		t.Fatal("only HS256 should be accepted")
++	}
++}
++
++func TestEmptySecretRejected(t *testing.T) {
++	t.Setenv("JWT_ACCESS_SECRET", "")
++	tok := sign(t, jwt.SigningMethodHS256, "", time.Now().Add(time.Hour))
++
++	if _, err := ValidateAccessToken(tok); err == nil {
++		t.Fatal("empty secret must never validate tokens")
++	}
++}
++
++func TestGarbageRejected(t *testing.T) {
++	t.Setenv("JWT_ACCESS_SECRET", testSecret)
++	if _, err := ValidateAccessToken("not-a-jwt"); err == nil {
++		t.Fatal("garbage must be rejected")
++	}
++}
+diff --git a/scripts/live_test.ps1 b/scripts/live_test.ps1
+new file mode 100644
+index 0000000..c8b8e6f
+--- /dev/null
++++ b/scripts/live_test.ps1
+@@ -0,0 +1,56 @@
++# Live WebSocket check, no wscat needed.
++# Run from repo root:  powershell -ExecutionPolicy Bypass -File .\live_test.ps1
++$ErrorActionPreference = "Stop"
++$U = "http://localhost:8080"
++$C = "http://localhost:8081"
++$sfx = Get-Random -Maximum 99999
++
++function Pick($o, [string[]]$names) {
++    if ($null -eq $o) { return $null }
++    foreach ($n in $names) { if ($o.PSObject.Properties.Name -contains $n) { return $o.$n } }
++    return $null
++}
++function Api-Post($url, $body, $token) {
++    $h = @{}
++    if ($token) { $h["Authorization"] = "Bearer $token" }
++    Invoke-RestMethod -Method Post -Uri $url -Headers $h -ContentType "application/json" -Body ($body | ConvertTo-Json)
++}
++function Api-Get($url, $token) {
++    Invoke-RestMethod -Method Get -Uri $url -Headers @{ Authorization = "Bearer $token" }
++}
++function Receive-One($ws, $ms) {
++    $buf = New-Object byte[] 8192
++    $seg = [System.ArraySegment[byte]]::new($buf)
++    $task = $ws.ReceiveAsync($seg, [Threading.CancellationToken]::None)
++    if (-not $task.Wait($ms)) { return $null }
++    return [Text.Encoding]::UTF8.GetString($buf, 0, $task.Result.Count)
++}
++
++$a = "alice$sfx"; $b = "bob$sfx"
++foreach ($n in @($a, $b)) {
++    Api-Post "$U/auth/register" @{ username = $n; email = "$n@test.com"; password = "password123" } $null | Out-Null
++}
++$ta = (Api-Post "$U/auth/login" @{ email = "$a@test.com"; password = "password123" } $null).access_token
++$tb = (Api-Post "$U/auth/login" @{ email = "$b@test.com"; password = "password123" } $null).access_token
++$bobId = Pick (Api-Get "$U/users/me" $tb) @("ID", "id")
++$conv = Api-Post "$C/conversations/private" @{ participant_id = "$bobId" } $ta
++$cid = (Pick $conv @("conversation")).ID
++
++# Connect Bob (access token in query string)
++$ws = New-Object System.Net.WebSockets.ClientWebSocket
++$ws.ConnectAsync([Uri]"ws://localhost:8081/ws?token=$tb", [Threading.CancellationToken]::None).Wait()
++Write-Host "Bob socket state: $($ws.State)" -ForegroundColor Cyan
++
++# Alice sends via REST
++Api-Post "$C/messages" @{ conversation_id = [int]$cid; content = "live test" } $ta | Out-Null
++Write-Host "Alice sent 'live test' in conversation $cid" -ForegroundColor Cyan
++
++# Bob should get it on his socket
++$msg = Receive-One $ws 5000
++if ($msg) {
++    Write-Host "BOB RECEIVED LIVE: $msg" -ForegroundColor Green
++    Write-Host "PASS" -ForegroundColor Green
++} else {
++    Write-Host "Nothing arrived within 5s -> FAIL" -ForegroundColor Red
++}
++$ws.Dispose()
+diff --git a/scripts/smoke_test.ps1 b/scripts/smoke_test.ps1
+new file mode 100644
+index 0000000..3955aa9
+--- /dev/null
++++ b/scripts/smoke_test.ps1
+@@ -0,0 +1,59 @@
++# Core flow: register -> login -> private chat -> send -> history
++# Run from repo root:  powershell -ExecutionPolicy Bypass -File .\scripts\smoke_test.ps1
++$ErrorActionPreference = "Stop"
++$U = "http://localhost:8080"
++$C = "http://localhost:8081"
++$sfx = Get-Random -Maximum 99999
++
++function Pick($o, [string[]]$names) {
++    if ($null -eq $o) { return $null }
++    foreach ($n in $names) {
++        if ($o.PSObject.Properties.Name -contains $n) { return $o.$n }
++    }
++    return $null
++}
++function Api-Post($url, $body, $token) {
++    $h = @{}
++    if ($token) { $h["Authorization"] = "Bearer $token" }
++    Invoke-RestMethod -Method Post -Uri $url -Headers $h -ContentType "application/json" -Body ($body | ConvertTo-Json)
++}
++function Api-Get($url, $token) {
++    Invoke-RestMethod -Method Get -Uri $url -Headers @{ Authorization = "Bearer $token" }
++}
++function Show($label, $obj) {
++    Write-Host "--- $label" -ForegroundColor Cyan
++    $obj | ConvertTo-Json -Depth 6
++}
++
++$a = "alice$sfx"; $b = "bob$sfx"
++foreach ($n in @($a, $b)) {
++    Api-Post "$U/auth/register" @{ username = $n; email = "$n@test.com"; password = "password123" } $null | Out-Null
++}
++
++$la = Api-Post "$U/auth/login" @{ email = "$a@test.com"; password = "password123" } $null
++$lb = Api-Post "$U/auth/login" @{ email = "$b@test.com"; password = "password123" } $null
++Show "login response (alice)" $la
++$ta = Pick $la @("access_token", "AccessToken", "accessToken")
++$tb = Pick $lb @("access_token", "AccessToken", "accessToken")
++if (-not $ta -or -not $tb) { throw "Could not find access token in login response" }
++Write-Host "TOKEN_B (for wscat): $tb" -ForegroundColor Green
++
++$me = Api-Get "$U/users/me" $tb
++Show "/users/me (bob)" $me
++$bobId = Pick $me @("id", "ID", "Id")
++if (-not $bobId) { $bobId = Pick (Pick $me @("user", "User")) @("id", "ID", "Id") }
++if (-not $bobId) { throw "Could not find user id in /users/me response" }
++Write-Host "bob id: $bobId"
++
++$conv = Api-Post "$C/conversations/private" @{ participant_id = "$bobId" } $ta
++Show "create conversation" $conv
++$cid = Pick $conv @("id", "ID", "Id")
++if (-not $cid) { $cid = Pick (Pick $conv @("conversation", "Conversation")) @("id", "ID", "Id") }
++if (-not $cid) { throw "Could not find conversation id" }
++
++$sent = Api-Post "$C/messages" @{ conversation_id = [int]$cid; content = "hello bob" } $ta
++Show "send message" $sent
++
++$hist = Api-Get "$C/conversations/$cid/messages" $tb
++Show "bob's history" $hist
++Write-Host "DONE" -ForegroundColor Green
+diff --git a/scripts/smoke_test.sh b/scripts/smoke_test.sh
+new file mode 100755
+index 0000000..8cbaa51
+--- /dev/null
++++ b/scripts/smoke_test.sh
+@@ -0,0 +1,30 @@
++#!/usr/bin/env bash
++# Core flow: register -> login -> private chat -> send -> history
++set -euo pipefail
++U=http://localhost:8080
++C=http://localhost:8081
++SFX=$RANDOM
++
++reg() { curl -s -X POST $U/auth/register -H 'Content-Type: application/json' \
++  -d "{\"username\":\"$1\",\"email\":\"$1@test.com\",\"password\":\"password123\"}" >/dev/null; }
++login() { curl -s -X POST $U/auth/login -H 'Content-Type: application/json' \
++  -d "{\"email\":\"$1@test.com\",\"password\":\"password123\"}"; }
++tok() { python3 -c 'import sys,json; print(json.load(sys.stdin)["access_token"])'; }
++
++reg alice$SFX; reg bob$SFX
++TA=$(login alice$SFX | tok); TB=$(login bob$SFX | tok)
++echo "TOKEN_B (use for wscat): $TB"
++
++BOB_ID=$(curl -s $U/users/me -H "Authorization: Bearer $TB" \
++  | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get("id") or d.get("user",{}).get("ID") or d.get("ID"))')
++echo "bob id: $BOB_ID"
++
++CONV=$(curl -s -X POST $C/conversations/private -H "Authorization: Bearer $TA" \
++  -H 'Content-Type: application/json' -d "{\"participant_id\":\"$BOB_ID\"}" \
++  | python3 -c 'import sys,json; d=json.load(sys.stdin); print((d.get("conversation") or d).get("ID") or (d.get("conversation") or d).get("id"))')
++echo "conversation: $CONV"
++
++curl -s -X POST $C/messages -H "Authorization: Bearer $TA" -H 'Content-Type: application/json' \
++  -d "{\"conversation_id\":$CONV,\"content\":\"hello bob\"}"; echo
++echo "--- bob's history:"
++curl -s "$C/conversations/$CONV/messages" -H "Authorization: Bearer $TB"; echo
+diff --git a/user_service/.env.example b/user_service/.env.example
+new file mode 100644
+index 0000000..53eb11e
+--- /dev/null
++++ b/user_service/.env.example
+@@ -0,0 +1,8 @@
++DB_HOST=localhost
++DB_USER=postgres
++DB_PASSWORD=postgres
++DB_NAME=chat_db
++DB_PORT=5432
++# JWT_ACCESS_SECRET must be identical in chat_service/.env
++JWT_ACCESS_SECRET=change-me-long-random-string
++JWT_REFRESH_SECRET=change-me-another-long-random-string
+diff --git a/user_service/cmd/server/main.go b/user_service/cmd/server/main.go
+index 0652f0b..0af30fd 100644
+--- a/user_service/cmd/server/main.go
++++ b/user_service/cmd/server/main.go
+@@ -23,10 +23,14 @@ import (
+ 
+ func main() {
+ 
+-	err := godotenv.Load("../../.env")
++	// .env is optional: real environment variables win.
++	for _, path := range []string{".env", "../../.env"} {
++		_ = godotenv.Load(path)
++	}
+ 
+-	if err != nil {
+-		log.Fatal(err)
++	if os.Getenv("JWT_ACCESS_SECRET") == "" ||
++		os.Getenv("JWT_REFRESH_SECRET") == "" {
++		log.Fatal("JWT_ACCESS_SECRET and JWT_REFRESH_SECRET must be set")
+ 	}
+ 
+ 	dsn := fmt.Sprintf(
+diff --git a/user_service/pkg/jwt/jwt.go b/user_service/pkg/jwt/jwt.go
+index d46ca92..ee8dda3 100644
+--- a/user_service/pkg/jwt/jwt.go
++++ b/user_service/pkg/jwt/jwt.go
+@@ -7,10 +7,15 @@ import (
+ 	"github.com/golang-jwt/jwt/v5"
+ )
+ 
+-var (
+-	AccessSecret  = []byte(os.Getenv("JWT_ACCESS_SECRET"))
+-	RefreshSecret = []byte(os.Getenv("JWT_REFRESH_SECRET"))
+-)
++// Read at call time (not package init) so values loaded
++// from .env in main() are visible.
++func accessSecret() []byte {
++	return []byte(os.Getenv("JWT_ACCESS_SECRET"))
++}
++
++func refreshSecret() []byte {
++	return []byte(os.Getenv("JWT_REFRESH_SECRET"))
++}
+ 
+ type Claims struct {
+ 	UserID string `json:"user_id"`
+@@ -50,7 +55,7 @@ func GenerateAccessToken(
+ 	)
+ 
+ 	return token.SignedString(
+-		AccessSecret,
++		accessSecret(),
+ 	)
+ }
+ 
+@@ -79,7 +84,7 @@ func GenerateRefreshToken(
+ 	)
+ 
+ 	return token.SignedString(
+-		RefreshSecret,
++		refreshSecret(),
+ 	)
+ }
+ func ValidateAccessToken(
+@@ -93,8 +98,9 @@ func ValidateAccessToken(
+ 			token *jwt.Token,
+ 		) (interface{}, error) {
+ 
+-			return AccessSecret, nil
++			return accessSecret(), nil
+ 		},
++		jwt.WithValidMethods([]string{"HS256"}),
+ 	)
+ 
+ 	if err != nil {
+@@ -121,8 +127,9 @@ func ValidateRefreshToken(
+ 			token *jwt.Token,
+ 		) (interface{}, error) {
+ 
+-			return RefreshSecret, nil
++			return refreshSecret(), nil
+ 		},
++		jwt.WithValidMethods([]string{"HS256"}),
+ 	)
+ 
+ 	if err != nil {
+diff --git a/user_service/pkg/jwt/jwt_test.go b/user_service/pkg/jwt/jwt_test.go
+new file mode 100644
+index 0000000..ec6b1e5
+--- /dev/null
++++ b/user_service/pkg/jwt/jwt_test.go
+@@ -0,0 +1,72 @@
++package jwtutil
++
++import "testing"
++
++func TestAccessTokenRoundTrip(t *testing.T) {
++	t.Setenv("JWT_ACCESS_SECRET", "access-secret")
++	t.Setenv("JWT_REFRESH_SECRET", "refresh-secret")
++
++	tok, err := GenerateAccessToken("5", "a@test.com", "user")
++	if err != nil {
++		t.Fatal(err)
++	}
++	c, err := ValidateAccessToken(tok)
++	if err != nil {
++		t.Fatalf("valid access token rejected: %v", err)
++	}
++	if c.UserID != "5" || c.Email != "a@test.com" || c.Role != "user" {
++		t.Fatalf("unexpected claims: %+v", c)
++	}
++}
++
++func TestRefreshTokenRoundTrip(t *testing.T) {
++	t.Setenv("JWT_ACCESS_SECRET", "access-secret")
++	t.Setenv("JWT_REFRESH_SECRET", "refresh-secret")
++
++	tok, err := GenerateRefreshToken("5")
++	if err != nil {
++		t.Fatal(err)
++	}
++	id, err := ValidateRefreshToken(tok)
++	if err != nil || id != "5" {
++		t.Fatalf("want 5, got %q err=%v", id, err)
++	}
++}
++
++func TestTokensAreNotInterchangeable(t *testing.T) {
++	t.Setenv("JWT_ACCESS_SECRET", "access-secret")
++	t.Setenv("JWT_REFRESH_SECRET", "refresh-secret")
++
++	access, _ := GenerateAccessToken("5", "a@test.com", "user")
++	refresh, _ := GenerateRefreshToken("5")
++
++	if _, err := ValidateRefreshToken(access); err == nil {
++		t.Fatal("access token must not validate as refresh token")
++	}
++	if _, err := ValidateAccessToken(refresh); err == nil {
++		t.Fatal("refresh token must not validate as access token")
++	}
++}
++
++func TestSecretReadAtCallTime(t *testing.T) {
++	// Regression: secrets used to be captured at package init,
++	// before main() loaded .env.
++	t.Setenv("JWT_ACCESS_SECRET", "set-after-init")
++	tok, err := GenerateAccessToken("1", "x@test.com", "user")
++	if err != nil {
++		t.Fatal(err)
++	}
++	if _, err := ValidateAccessToken(tok); err != nil {
++		t.Fatalf("round trip with late secret failed: %v", err)
++	}
++}
++
++func TestWrongSecretRejected(t *testing.T) {
++	t.Setenv("JWT_ACCESS_SECRET", "one")
++	tok, _ := GenerateAccessToken("1", "x@test.com", "user")
++
++	t.Setenv("JWT_ACCESS_SECRET", "two")
++	if _, err := ValidateAccessToken(tok); err == nil {
++		t.Fatal("token signed with a different secret must be rejected")
++	}
++}
