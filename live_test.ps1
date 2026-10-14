@@ -34,11 +34,18 @@ Write-Host "Bob socket state: $($ws.State)" -ForegroundColor Cyan
 Api-Post "$C/messages" @{ conversation_id = [int]$cid; content = "live test" } $ta | Out-Null
 Write-Host "Alice sent 'live test' in conversation $cid" -ForegroundColor Cyan
 
-$msg = Receive-One $ws 5000
-if ($msg) {
-    Write-Host "BOB RECEIVED LIVE: $msg" -ForegroundColor Green
-    Write-Host "PASS" -ForegroundColor Green
-} else {
-    Write-Host "Nothing arrived within 5s -> FAIL" -ForegroundColor Red
+$buf = New-Object byte[] 8192
+$seg = [System.ArraySegment[byte]]::new($buf)
+$deadline = (Get-Date).AddSeconds(5)
+$got = $false
+$task = $ws.ReceiveAsync($seg, [Threading.CancellationToken]::None)
+while ((Get-Date) -lt $deadline) {
+    if ($task.Wait(500)) {
+        $msg = [Text.Encoding]::UTF8.GetString($buf, 0, $task.Result.Count)
+        Write-Host "received: $msg"
+        if ($msg -match "live test") { $got = $true; break }
+        $task = $ws.ReceiveAsync($seg, [Threading.CancellationToken]::None)
+    }
 }
-$ws.Dispose()
+if ($got) { Write-Host "PASS" -ForegroundColor Green }
+else { Write-Host "FAIL: chat message never arrived" -ForegroundColor Red }
