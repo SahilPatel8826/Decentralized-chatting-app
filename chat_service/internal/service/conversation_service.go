@@ -70,22 +70,8 @@ func (s *ConversationService) CreatePrivateConversation(
 	if userID == participantID {
 		return nil, ErrCannotChatWithSelf
 	}
-
-	lookupCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-	defer cancel()
-
-	exists, err := s.userClient.UserExists(lookupCtx, participantID)
-
-	if err != nil {
-		switch status.Code(err) {
-		case codes.Unavailable, codes.DeadlineExceeded:
-			return nil, ErrUserServiceUnavailable
-		}
+	if err := s.checkUserExists(ctx, participantID); err != nil {
 		return nil, err
-	}
-
-	if !exists {
-		return nil, ErrUserNotFound
 	}
 
 	// ... existingConversation, err := s.repo.FindPrivateConversation(...)
