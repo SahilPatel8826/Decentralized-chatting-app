@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"strconv"
+	"strings"
 	"time"
 
 	"google.golang.org/grpc/codes"
@@ -247,7 +248,8 @@ func (s *ConversationService) CreateGroupConversation(
 		return nil, ErrUserIDRequired
 	}
 
-	if req.Name == "" {
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
 		return nil, ErrGroupNameRequired
 	}
 
@@ -255,49 +257,52 @@ func (s *ConversationService) CreateGroupConversation(
 		return nil, ErrParticipantsRequired
 	}
 
-	conversation := &model.Conversation{
-		Type: "group",
-		Name: req.Name,
+	// Validate every member BEFORE writing anything.
+	seen := map[string]bool{creatorID: true}
+	members := make([]string, 0, len(req.Participants))
+
+	for _, raw := range req.Participants {
+		id, err := normalizeUserID(raw)
+		if err != nil {
+			return nil, err
+		}
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+
+		if err := s.checkUserExists(ctx, id); err != nil {
+			return nil, err
+		}
+		members = append(members, id)
 	}
 
-	err := s.repo.CreateConversation(
-		ctx,
-		conversation,
-	)
+	if len(members) == 0 {
+		return nil, ErrParticipantsRequired
+	}
 
+	conversation := &model.Conversation{
+		Type: "group",
+		Name: name,
+	}
+
+	err := s.repo.CreateConversation(ctx, conversation)
 	if err != nil {
 		return nil, err
 	}
 
 	participants := []model.ConversationParticipant{
-		{
+		{ConversationID: conversation.ID, UserID: creatorID, Role: "admin"},
+	}
+	for _, id := range members {
+		participants = append(participants, model.ConversationParticipant{
 			ConversationID: conversation.ID,
-			UserID:         creatorID,
-			Role:           "admin",
-		},
+			UserID:         id,
+			Role:           "member",
+		})
 	}
 
-	for _, participantID := range req.Participants {
-
-		if participantID == creatorID {
-			continue
-		}
-
-		participants = append(
-			participants,
-			model.ConversationParticipant{
-				ConversationID: conversation.ID,
-				UserID:         participantID,
-				Role:           "member",
-			},
-		)
-	}
-
-	err = s.repo.CreateParticipants(
-		ctx,
-		participants,
-	)
-
+	err = s.repo.CreateParticipants(ctx, participants)
 	if err != nil {
 		return nil, err
 	}
