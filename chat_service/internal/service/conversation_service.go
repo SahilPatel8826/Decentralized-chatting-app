@@ -212,6 +212,31 @@ func (s *ConversationService) GetUserConversations(
 
 	return conversations, nil
 }
+func normalizeUserID(id string) (string, error) {
+	n, err := strconv.ParseUint(id, 10, 64)
+	if err != nil {
+		return "", ErrInvalidUserID
+	}
+	return strconv.FormatUint(n, 10), nil
+}
+
+func (s *ConversationService) checkUserExists(ctx context.Context, id string) error {
+	lookupCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+
+	exists, err := s.userClient.UserExists(lookupCtx, id)
+	if err != nil {
+		switch status.Code(err) {
+		case codes.Unavailable, codes.DeadlineExceeded:
+			return ErrUserServiceUnavailable
+		}
+		return err
+	}
+	if !exists {
+		return ErrUserNotFound
+	}
+	return nil
+}
 func (s *ConversationService) CreateGroupConversation(
 	ctx context.Context,
 	creatorID string,
