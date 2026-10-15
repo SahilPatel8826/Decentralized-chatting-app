@@ -57,18 +57,18 @@ func (s *ConversationService) CreatePrivateConversation(
 		return nil, ErrCannotChatWithSelf
 	}
 
-	// exists, err := s.userClient.UserExists(
-	// 	ctx,
-	// 	participantID,
-	// )
+	exists, err := s.userClient.UserExists(
+		ctx,
+		participantID,
+	)
 
-	// if err != nil {
-	// 	return nil, err
-	// }
+	if err != nil {
+		return nil, err
+	}
 
-	// if !exists {
-	// 	return nil, ErrUserNotFound
-	// }
+	if !exists {
+		return nil, ErrUserNotFound
+	}
 
 	existingConversation, err :=
 		s.repo.FindPrivateConversation(
