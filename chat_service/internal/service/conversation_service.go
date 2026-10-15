@@ -45,7 +45,6 @@ func NewConversationService(
 		userClient: userClient,
 	}
 }
-
 func (s *ConversationService) CreatePrivateConversation(
 	ctx context.Context,
 	userID string,
@@ -90,6 +89,17 @@ func (s *ConversationService) CreatePrivateConversation(
 
 	// ... existingConversation, err := s.repo.FindPrivateConversation(...)
 	// ... and everything below stays unchanged
+
+	existingConversation, err :=
+		s.repo.FindPrivateConversation(
+			ctx,
+			userID,
+			participantID,
+		)
+
+	if err != nil {
+		return nil, err
+	}
 
 	if existingConversation != nil {
 		return existingConversation, nil
