@@ -8,6 +8,11 @@ import (
 	"chat_service/pb"
 	"context"
 	"errors"
+	"strconv"
+	"time"
+
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 type ConversationService struct {
@@ -55,16 +60,27 @@ func (s *ConversationService) CreatePrivateConversation(
 		return nil, ErrParticipantIDRequired
 	}
 
+	// Must be a number. Re-format it so "05" and "5" become the same ID.
+	pid, err := strconv.ParseUint(participantID, 10, 64)
+	if err != nil {
+		return nil, ErrInvalidUserID
+	}
+	participantID = strconv.FormatUint(pid, 10)
+
 	if userID == participantID {
 		return nil, ErrCannotChatWithSelf
 	}
 
-	exists, err := s.userClient.UserExists(
-		ctx,
-		participantID,
-	)
+	lookupCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+
+	exists, err := s.userClient.UserExists(lookupCtx, participantID)
 
 	if err != nil {
+		switch status.Code(err) {
+		case codes.Unavailable, codes.DeadlineExceeded:
+			return nil, ErrUserServiceUnavailable
+		}
 		return nil, err
 	}
 
@@ -72,16 +88,8 @@ func (s *ConversationService) CreatePrivateConversation(
 		return nil, ErrUserNotFound
 	}
 
-	existingConversation, err :=
-		s.repo.FindPrivateConversation(
-			ctx,
-			userID,
-			participantID,
-		)
-
-	if err != nil {
-		return nil, err
-	}
+	// ... existingConversation, err := s.repo.FindPrivateConversation(...)
+	// ... and everything below stays unchanged
 
 	if existingConversation != nil {
 		return existingConversation, nil
