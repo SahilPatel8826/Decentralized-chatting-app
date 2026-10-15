@@ -2,11 +2,17 @@ package grpc
 
 import (
 	"context"
+	"errors"
+	"log"
 	"strconv"
 
 	pb "chat_app/pb"
 
 	"chat_app/internal/repository"
+
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+	"gorm.io/gorm"
 )
 
 type UserServer struct {
@@ -23,7 +29,6 @@ func NewUserServer(
 		userRepo: userRepo,
 	}
 }
-
 func (s *UserServer) UserExists(
 	ctx context.Context,
 	req *pb.UserExistsRequest,
@@ -32,20 +37,18 @@ func (s *UserServer) UserExists(
 	error,
 ) {
 
-	user, err :=
-		s.userRepo.GetByID(
+	_, err := s.userRepo.GetByID(req.UserId)
 
-			req.UserId,
-		)
-
-	if err != nil {
-
-		return nil, err
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return &pb.UserExistsResponse{Exists: false}, nil
 	}
 
-	return &pb.UserExistsResponse{
-		Exists: user != nil,
-	}, nil
+	if err != nil {
+		log.Println("UserExists lookup failed:", err)
+		return nil, status.Error(codes.Internal, "user lookup failed")
+	}
+
+	return &pb.UserExistsResponse{Exists: true}, nil
 }
 
 func (s *UserServer) GetUser(
