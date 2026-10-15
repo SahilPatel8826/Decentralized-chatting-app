@@ -26,6 +26,8 @@ var (
 	ErrForbidden              = errors.New("forbidden")
 	ErrGroupNameRequired      = errors.New("group name is required")
 	ErrParticipantsRequired   = errors.New("participants are required")
+	ErrInvalidUserID          = errors.New("invalid user id")
+	ErrUserServiceUnavailable = errors.New("user service unavailable")
 )
 
 func NewConversationService(
