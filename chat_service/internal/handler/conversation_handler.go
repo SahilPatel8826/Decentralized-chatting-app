@@ -1,6 +1,8 @@
 package handler
 
 import (
+	"errors"
+	"log"
 	"net/http"
 	"strconv"
 
@@ -20,6 +22,29 @@ func NewConversationHandler(
 
 	return &ConversationHandler{
 		conversationService: conversationService,
+	}
+}
+func writeError(c *gin.Context, err error) {
+	switch {
+	case errors.Is(err, service.ErrUserNotFound),
+		errors.Is(err, service.ErrConversationNotFound):
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+
+	case errors.Is(err, service.ErrForbidden):
+		c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
+
+	case errors.Is(err, service.ErrInvalidUserID),
+		errors.Is(err, service.ErrCannotChatWithSelf),
+		errors.Is(err, service.ErrUserIDRequired),
+		errors.Is(err, service.ErrParticipantIDRequired):
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+
+	case errors.Is(err, service.ErrUserServiceUnavailable):
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": err.Error()})
+
+	default:
+		log.Println("internal error:", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
 	}
 }
 func (h *ConversationHandler) CreatePrivateConversation(
